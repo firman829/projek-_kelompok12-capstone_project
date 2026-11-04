@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PDF ke ChromaDB</title>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,500;6..72,600&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eef2f1;--ink:#14212b;--mute:#5b6b75;--line:#cdd8d6;--card:#fbfdfc;--accent:#1f5eff;--hl:#ffd66b;--ok:#17794a;--err:#b3261e}
+@media (prefers-color-scheme:dark){:root{--bg:#10181d;--ink:#e6eeee;--mute:#94a5ac;--line:#25343c;--card:#16222a;--accent:#7ea2ff;--hl:#6b5514;--ok:#58d39b;--err:#ff8a80}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.55 "Instrument Sans",system-ui,sans-serif}
+main{max-width:920px;margin:0 auto;padding:40px 20px 80px}
+h1{font:600 clamp(2rem,5vw,3.2rem)/1.1 Newsreader,Georgia,serif;margin:0 0 8px}
+.sub{color:var(--mute);max-width:60ch;margin:0 0 32px}
+section{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:22px;margin-bottom:20px}
+h2{font:600 1.15rem Newsreader,Georgia,serif;margin:0 0 14px}
+#drop{border:2px dashed var(--line);border-radius:8px;padding:34px 16px;text-align:center;cursor:pointer;transition:.15s}
+#drop.over,#drop:focus-visible{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 8%,transparent);outline:none}
+#drop strong{display:block;font-size:1.05rem}
+#drop span{color:var(--mute);font-size:.9rem}
+.row{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:14px;margin:16px 0}
+label{display:block;font-size:.88rem;color:var(--mute);margin-bottom:4px}
+input,select{width:100%;padding:9px 11px;border:1px solid var(--line);border-radius:6px;background:var(--bg);color:var(--ink);font:inherit}
+input:focus-visible,select:focus-visible,button:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+button{padding:10px 18px;border:0;border-radius:6px;background:var(--accent);color:#fff;font:600 .95rem inherit;font-family:inherit;cursor:pointer}
+button.ghost{background:transparent;color:var(--ink);border:1px solid var(--line)}
+button:disabled{opacity:.5;cursor:wait}
+ul{list-style:none;padding:0;margin:12px 0 0}
+li{display:flex;justify-content:space-between;gap:12px;padding:8px 0;border-top:1px solid var(--line);font-size:.93rem}
+.ok{color:var(--ok)}.err{color:var(--err)}
+.col{display:flex;align-items:center;gap:10px;flex-wrap:wrap;justify-content:space-between}
+.col div:last-child{display:flex;gap:8px}
+.hit{border-left:4px solid var(--hl);padding:4px 0 4px 14px;margin:16px 0}
+.hit small{color:var(--mute);display:block;margin-bottom:4px}
+.hit p{margin:0;white-space:pre-wrap;font-size:.95rem}
+.bar{display:flex;gap:10px}.bar input{flex:1}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+<main>
+<h1>Ubah PDF menjadi dataset LLM</h1>
+<p class="sub">Unggah PDF, teksnya dipotong menjadi chunk, lalu disimpan sebagai vektor di ChromaDB. Hasilnya bisa dicari secara semantik dan diunduh sebagai JSONL.</p>
+
+<section>
+  <h2>1. Unggah PDF</h2>
+  <div id="drop" tabindex="0" role="button" aria-label="Pilih file PDF">
+    <strong>Tarik PDF ke sini atau klik untuk memilih</strong>
+    <span id="picked">Bisa lebih dari satu file</span>
+  </div>
+  <input id="file" type="file" accept="application/pdf" multiple hidden>
+  <div class="row">
+    <div><label for="col">Nama koleksi</label><input id="col" value="dokumen"></div>
+    <div><label for="size">Ukuran chunk (karakter)</label><input id="size" type="number" value="1000" min="200" max="4000"></div>
+    <div><label for="ov">Overlap (karakter)</label><input id="ov" type="number" value="150" min="0" max="1000"></div>
+  </div>
+  <button id="go">Proses dan simpan ke ChromaDB</button>
+  <ul id="report" aria-live="polite"></ul>
+</section>
+
+<section>
+  <h2>2. Koleksi tersimpan</h2>
+  <ul id="cols"><li>Memuat…</li></ul>
+</section>
+
+<section>
+  <h2>3. Cari di dataset</h2>
+  <div class="row"><div><label for="scol">Koleksi</label><select id="scol"></select></div></div>
+  <div class="bar"><input id="q" placeholder="Tulis pertanyaan atau kata kunci"><button id="find">Cari</button></div>
+  <div id="hits"></div>
+</section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let files = [];
+
+$('drop').onclick = () => $('file').click();
+$('drop').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); $('file').click(); } };
+$('drop').ondragover = e => { e.preventDefault(); $('drop').classList.add('over'); };
+$('drop').ondragleave = () => $('drop').classList.remove('over');
+$('drop').ondrop = e => { e.preventDefault(); $('drop').classList.remove('over'); setFiles(e.dataTransfer.files); };
+$('file').onchange = e => setFiles(e.target.files);
+
+function setFiles(list) {
+  files = [...list].filter(f => f.name.toLowerCase().endsWith('.pdf'));
+  $('picked').textContent = files.length ? files.map(f => f.name).join(', ') : 'Tidak ada file PDF yang dipilih';
+}
+
+function li(html, cls) { const e = document.createElement('li'); if (cls) e.className = cls; e.append(...html); return e; }
+const span = t => Object.assign(document.createElement('span'), { textContent: t });
+
+$('go').onclick = async () => {
+  if (!files.length) return alert('Pilih minimal satu file PDF.');
+  const fd = new FormData();
+  files.forEach(f => fd.append('files', f));
+  fd.append('collection', $('col').value);
+  fd.append('chunk_size', $('size').value);
+  fd.append('overlap', $('ov').value);
+  $('go').disabled = true; $('go').textContent = 'Memproses…';
+  $('report').replaceChildren();
+  try {
+    const r = await fetch('/api/upload', { method: 'POST', body: fd });
+    const d = await r.json();
+    if (!r.ok) throw new Error(d.detail);
+    d.report.forEach(x => $('report').append(x.error
+      ? li([span(x.file), span(x.error)], 'err')
+      : li([span(x.file), span(`${x.pages} halaman → ${x.chunks} chunk`)], 'ok')));
+    loadCols();
+  } catch (e) { $('report').append(li([span('Gagal'), span(e.message)], 'err')); }
+  $('go').disabled = false; $('go').textContent = 'Proses dan simpan ke ChromaDB';
+};
+
+async function loadCols() {
+  const cols = await (await fetch('/api/collections')).json();
+  $('cols').replaceChildren(); $('scol').replaceChildren();
+  if (!cols.length) $('cols').append(li([span('Belum ada koleksi. Unggah PDF dulu.')]));
+  cols.forEach(c => {
+    const act = document.createElement('div');
+    const dl = Object.assign(document.createElement('button'), { className: 'ghost', textContent: 'Unduh JSONL' });
+    dl.onclick = () => location.href = '/api/export/' + encodeURIComponent(c.name);
+    const del = Object.assign(document.createElement('button'), { className: 'ghost', textContent: 'Hapus' });
+    del.onclick = async () => { if (confirm(`Hapus koleksi "${c.name}"?`)) { await fetch('/api/collections/' + encodeURIComponent(c.name), { method: 'DELETE' }); loadCols(); } };
+    act.append(dl, del);
+    const row = document.createElement('li'); row.className = 'col';
+    const info = document.createElement('div'); info.textContent = `${c.name} · ${c.count} chunk`;
+    row.append(info, act); $('cols').append(row);
+    $('scol').append(new Option(c.name, c.name));
+  });
+}
+
+$('find').onclick = async () => {
+  const q = $('q').value.trim(); if (!q || !$('scol').value) return;
+  const r = await fetch(`/api/search?collection=${encodeURIComponent($('scol').value)}&q=${encodeURIComponent(q)}`);
+  const d = await r.json(); $('hits').replaceChildren();
+  if (!r.ok) return $('hits').append(span(d.detail));
+  d.forEach(h => {
+    const box = document.createElement('div'); box.className = 'hit';
+    const m = document.createElement('small'); m.textContent = `${h.meta.source} · halaman ${h.meta.page} · jarak ${h.distance}`;
+    const p = document.createElement('p'); p.textContent = h.text;
+    box.append(m, p); $('hits').append(box);
+  });
+};
+$('q').onkeydown = e => { if (e.key === 'Enter') $('find').click(); };
+loadCols();
+</script>
+</body>
+</html>
